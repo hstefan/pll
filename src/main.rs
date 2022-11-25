@@ -1,10 +1,27 @@
+use clap::Parser;
 use std::io::{BufRead, Read};
-use std::{process, thread};
 use std::str;
 use std::time::Duration;
+use std::{process, thread};
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    delim: Option<String>,
+
+    #[arg(short, long, default_value_t = 16)]
+    max_parallelism: usize,
+
+    #[arg(short, long, default_value_t = 1)]
+    num_args: usize,
+
+    program: Vec<String>,
+}
 
 struct ProcBuilder {
     pub program: String,
+    pub initial_args: Vec<String>,
     pub args: Vec<String>,
     pub max_args: usize,
 }
@@ -29,13 +46,19 @@ struct ProcPool {
 }
 
 impl ProcPool {
-    fn new(program: String, max_args: usize, max_parallelism: usize) -> ProcPool {
+    fn new(
+        program: String,
+        initial_args: Vec<String>,
+        max_args: usize,
+        max_parallelism: usize,
+    ) -> ProcPool {
         ProcPool {
             max_parallelism,
             next_exec: ProcBuilder {
-                program: program,
+                program,
+                initial_args,
                 args: vec![],
-                max_args: max_args,
+                max_args,
             },
             procs: vec![],
         }
@@ -51,6 +74,7 @@ impl ProcPool {
         self.wait_for_room();
         self.procs.push(
             process::Command::new(&self.next_exec.program)
+                .args(&self.next_exec.initial_args)
                 .args(&self.next_exec.args)
                 .stdin(process::Stdio::null())
                 .stdout(process::Stdio::piped())
@@ -61,6 +85,7 @@ impl ProcPool {
             program: self.next_exec.program.to_owned(),
             args: vec![],
             max_args: self.next_exec.max_args,
+            initial_args: self.next_exec.initial_args.to_owned(),
         }
     }
 
@@ -99,16 +124,28 @@ impl ProcPool {
             }
             // TODO: avoid this busy loop somehow
             thread::sleep(Duration::from_millis(50));
-        } 
+        }
     }
 }
 
 fn main() {
+    let args = Args::parse();
+
+    let delim = args.delim.map_or_else(|| b'\n', |v| v.as_bytes()[0]);
+    let program = args.program.get(0).map(AsRef::as_ref).unwrap_or("echo");
+    let initial_args = args.program.iter().skip(1).map(|v| v.to_owned()).collect();
+
     let stdin = std::io::stdin();
     let reader = stdin.lock();
-    let mut split_iter = reader.split(b'\n');
-    let mut pool = ProcPool::new("echo".into(), 2, 16);
-    while let Some(result) = split_iter.next() {
+    let split_iter = reader.split(delim);
+
+    let mut pool = ProcPool::new(
+        program.into(),
+        initial_args,
+        args.num_args,
+        args.max_parallelism,
+    );
+    for result in split_iter {
         let buf = result.expect("failed to read argumetn buf");
         let arg = str::from_utf8(&buf).expect("argument decoding failed");
         pool.push_arg(arg);
