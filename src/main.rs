@@ -10,11 +10,17 @@ struct Args {
     #[arg(short, long)]
     delim: Option<String>,
 
-    #[arg(short, long, default_value_t = 16)]
+    #[arg(short = 'p', long, default_value_t = 16)]
     max_parallelism: usize,
 
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(short = 'n', long = "args", default_value_t = 1)]
     num_args: usize,
+
+    #[arg(long, default_value_t = false)]
+    /// Causes the output of each execution will only be output after the process exits.
+    ///
+    /// Useful when it's undesireable to stream the ouput of several programs running in parallel.
+    pipe_stdout: bool,
 
     program: Vec<String>,
 }
@@ -43,6 +49,7 @@ struct ProcPool {
     max_parallelism: usize,
     next_exec: ProcBuilder,
     procs: Vec<process::Child>,
+    pipe_stdout: bool,
 }
 
 impl ProcPool {
@@ -51,6 +58,7 @@ impl ProcPool {
         initial_args: Vec<String>,
         max_args: usize,
         max_parallelism: usize,
+        pipe_stdout: bool,
     ) -> ProcPool {
         ProcPool {
             max_parallelism,
@@ -61,23 +69,29 @@ impl ProcPool {
                 max_args,
             },
             procs: vec![],
+            pipe_stdout,
         }
     }
 
     fn push_arg(&mut self, arg: &str) {
-        // we don't except the execution to be finalized without a new arg being pushed
+        // we don't expect the execution to be finalized without a new arg being pushed
         assert!(!self.next_exec.finalized());
         let finalized = self.next_exec.push_arg(arg.into());
         if !finalized {
             return;
         }
         self.wait_for_room();
+        let stdout_cfg = if self.pipe_stdout {
+            process::Stdio::piped()
+        } else {
+            process::Stdio::inherit()
+        };
         self.procs.push(
             process::Command::new(&self.next_exec.program)
                 .args(&self.next_exec.initial_args)
                 .args(&self.next_exec.args)
                 .stdin(process::Stdio::null())
-                .stdout(process::Stdio::piped())
+                .stdout(stdout_cfg)
                 .spawn()
                 .expect("unabled to spawn process"),
         );
@@ -103,6 +117,7 @@ impl ProcPool {
                 Ok(None) => true,
                 Ok(Some(_)) => {
                     if let Some(stdout) = c.stdout.as_mut() {
+                        // this path is only triggered when stdout is piped instead of inherited
                         let mut buf = String::new();
                         let bytes_read = stdout.read_to_string(&mut buf).unwrap_or_else(|e| {
                             eprintln!("failed to read stdout: {}", e);
@@ -144,9 +159,10 @@ fn main() {
         initial_args,
         args.num_args,
         args.max_parallelism,
+        args.pipe_stdout,
     );
     for result in split_iter {
-        let buf = result.expect("failed to read argumetn buf");
+        let buf = result.expect("failed to read argument buf");
         let arg = str::from_utf8(&buf).expect("argument decoding failed");
         pool.push_arg(arg);
     }
