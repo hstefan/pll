@@ -9,7 +9,14 @@ use std::{process, thread};
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(short, long)]
+    /// A string with all the characters that will be used to split arguments
     delim: Option<String>,
+
+    #[arg(short = '0', long = "null")]
+    /// Use null character ('\0') as a separator
+    ///
+    /// If a delimiter string is provide alongside this flag, the null character will be added to that list.
+    null_sep: bool,
 
     #[arg(short = 'p', long, default_value_t = 16)]
     max_parallelism: usize,
@@ -18,7 +25,7 @@ struct Args {
     num_args: usize,
 
     #[arg(long, default_value_t = false)]
-    /// Causes the output of each execution will only be output after the process exits.
+    /// When enabled the output of each execution will only be written to stdout after the process exits
     ///
     /// Useful when it's undesireable to stream the ouput of several programs running in parallel.
     pipe_stdout: bool,
@@ -194,7 +201,11 @@ impl<B: BufRead> ManySplit<B> for B {
 
 fn clean_arg<'a>(delims: &[u8], arg: &'a [u8]) -> Option<&'a str> {
     if let Some(start) = arg.iter().position(|x| !delims.contains(x)) {
-        Some(str::from_utf8(&arg[start..]).expect("argument decoding failed"))
+        if let Some(end) = arg.iter().skip(start).rev().position(|x| !delims.contains(x)) {
+            Some(str::from_utf8(&arg[start..(arg.len() - end)]).expect("argument decoding failed"))
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -203,15 +214,23 @@ fn clean_arg<'a>(delims: &[u8], arg: &'a [u8]) -> Option<&'a str> {
 fn main() {
     let args = Args::parse();
 
-    let delim = args
-        .delim
-        .map_or_else(|| vec![b'\n', b'\t', b' '], |v| v.as_bytes().to_vec());
+    let delims = match (args.delim, args.null_sep) {
+        (None, true) => vec![b'\0'],
+        (None, false) => vec![b'\n', b'\t', b' '],
+        (Some(v), null_sep) => {
+            let mut d = v.as_bytes().to_vec();
+            if null_sep {
+                d.push(b'\0');
+            }
+            d
+        }
+    };
     let program = args.program.get(0).map(AsRef::as_ref).unwrap_or("echo");
     let initial_args = args.program.iter().skip(1).map(|v| v.to_owned()).collect();
 
     let stdin = std::io::stdin();
     let reader = stdin.lock();
-    let split_iter = reader.split_any(&delim);
+    let split_iter = reader.split_any(&delims);
 
     let mut pool = ProcPool::new(
         program.into(),
@@ -222,7 +241,7 @@ fn main() {
     );
     for result in split_iter {
         let buf = result.expect("failed to read argument buf");
-        if let Some(arg) = clean_arg(&delim, &buf) {
+        if let Some(arg) = clean_arg(&delims, &buf) {
             pool.push_arg(arg);
         }
     }
