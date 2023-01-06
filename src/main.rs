@@ -5,6 +5,8 @@ use std::str;
 use std::time::Duration;
 use std::{process, thread};
 
+mod args;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -21,8 +23,18 @@ struct Args {
     #[arg(short = 'p', long, default_value_t = 16)]
     max_parallelism: usize,
 
-    #[arg(short = 'n', long = "args", default_value_t = 1)]
-    num_args: usize,
+    #[arg(short = 'n', long = "max-args", default_value_t = 1)]
+    /// Controls the max number of arguments that can be used to spawn a program
+    ///
+    /// This is ignored when using a template.
+    max_args_count: usize,
+
+    #[arg(long = "min-args", default_value_t = 1)]
+    /// Determines the min number of arguments required to spawn a program
+    ///
+    /// Only relevant in case there aren't enough arguments to fill up to max count. This is ignored when using
+    /// a template.
+    min_args_count: usize,
 
     #[arg(long, default_value_t = false)]
     /// When enabled the output of each execution will only be written to stdout after the process exits
@@ -39,166 +51,7 @@ struct Args {
     program: Vec<String>,
 }
 
-struct AppendArgs {
-    initial_args: Vec<String>,
-    args: Vec<String>,
-    max_args: usize,
-}
-
-trait ArgBuilder {
-    fn push_arg(&mut self, arg: String) -> bool;
-    fn arg_list(&self) -> Vec<String>;
-    fn finalized(&self) -> bool;
-}
-
-impl ArgBuilder for AppendArgs {
-    fn push_arg(&mut self, arg: String) -> bool {
-        assert!(!self.finalized());
-        self.args.push(arg);
-        self.finalized()
-    }
-
-    /// Returns true when the execution is finalized (ie cannot accept more arguments)
-    fn finalized(&self) -> bool {
-        self.args.len() >= self.max_args
-    }
-
-    fn arg_list(&self) -> Vec<String> {
-        self.initial_args
-            .iter()
-            .cloned()
-            .chain(self.args.iter().cloned())
-            .collect()
-    }
-}
-
-struct TemplateArgs {
-    arg_list: Vec<TemplateArg>,
-    idx: usize,
-    finalized_count: usize,
-}
-
-enum TemplateArg {
-    IndexedPlaceHolder(usize),
-    Value(String),
-}
-
-enum ArgBuilderType {
-    Template(TemplateArgs),
-    Append(AppendArgs),
-}
-
-impl ArgBuilder for ArgBuilderType {
-    fn push_arg(&mut self, arg: String) -> bool {
-        match self {
-            ArgBuilderType::Append(append) => append.push_arg(arg),
-            ArgBuilderType::Template(template) => template.push_arg(arg),
-        }
-    }
-
-    fn arg_list(&self) -> Vec<String> {
-        match self {
-            ArgBuilderType::Append(append) => append.arg_list(),
-            ArgBuilderType::Template(template) => template.arg_list(),
-        }
-    }
-
-    fn finalized(&self) -> bool {
-        match self {
-            ArgBuilderType::Append(append) => append.finalized(),
-            ArgBuilderType::Template(template) => template.finalized(),
-        }
-    }
-}
-
-impl TemplateArgs {
-    fn new(templ: Vec<String>) -> Result<TemplateArgs, String> {
-        let arg_list: Vec<TemplateArg> = templ
-            .iter()
-            .enumerate()
-            .map(|(idx, val)| match (val.find("{"), val.find("}")) {
-                (None, None) => TemplateArg::IndexedPlaceHolder(idx),
-                (Some(_), None) => TemplateArg::IndexedPlaceHolder(idx),
-                (None, Some(_)) => TemplateArg::IndexedPlaceHolder(idx),
-                (Some(i), Some(j)) => {
-                    let actual_idx = if j < i || j == i + 1 {
-                        idx
-                    } else if let Ok(templ_idx) = val[i + 1..j].parse::<usize>() {
-                        templ_idx
-                    } else {
-                        idx
-                    };
-                    TemplateArg::IndexedPlaceHolder(actual_idx)
-                }
-            })
-            .collect();
-        let finalized_count = arg_list
-            .iter()
-            .filter(|x| matches!(x, TemplateArg::Value(_)))
-            .count();
-        Ok(TemplateArgs {
-            arg_list,
-            idx: 0,
-            finalized_count,
-        })
-    }
-}
-
-impl ArgBuilder for TemplateArgs {
-    fn push_arg(&mut self, arg: String) -> bool {
-        assert!(!self.finalized());
-        for i in 0..self.arg_list.len() {
-            if let TemplateArg::IndexedPlaceHolder(templ_idx) = self.arg_list[i] {
-                if self.idx == templ_idx {
-                    self.arg_list[i] = TemplateArg::Value(arg.clone());
-                    self.finalized_count += 1;
-                }
-            }
-        }
-        self.idx += 1;
-        self.finalized()
-    }
-
-    fn arg_list(&self) -> Vec<String> {
-        self.arg_list
-            .iter()
-            .filter_map(|r| match r {
-                TemplateArg::Value(v) => Some(v.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn finalized(&self) -> bool {
-        self.finalized_count == self.arg_list.len()
-    }
-}
-
-trait ArgBuilderMaker<T: ArgBuilder> {
-    fn make(&self) -> T;
-}
-
-struct DynArgBuilderMaker {
-    is_template: bool,
-    initial_args: Vec<String>,
-    max_args: usize,
-}
-
-impl ArgBuilderMaker<ArgBuilderType> for DynArgBuilderMaker {
-    fn make(&self) -> ArgBuilderType {
-        if self.is_template {
-            ArgBuilderType::Template(TemplateArgs::new(self.initial_args.clone()).unwrap())
-        } else {
-            ArgBuilderType::Append(AppendArgs {
-                initial_args: self.initial_args.clone(),
-                args: vec![],
-                max_args: self.max_args,
-            })
-        }
-    }
-}
-
-struct ProcPool<T: ArgBuilder, U: ArgBuilderMaker<T>> {
+struct ProcPool<T: args::ArgBuilder, U: args::ArgBuilderMaker<T>> {
     program: String,
     max_parallelism: usize,
     proc_builder: T,
@@ -207,7 +60,7 @@ struct ProcPool<T: ArgBuilder, U: ArgBuilderMaker<T>> {
     pipe_stdout: bool,
 }
 
-impl<T: ArgBuilder, U: ArgBuilderMaker<T>> ProcPool<T, U> {
+impl<T: args::ArgBuilder, U: args::ArgBuilderMaker<T>> ProcPool<T, U> {
     fn new(
         program: String,
         proc_builder_fn: U,
@@ -225,13 +78,27 @@ impl<T: ArgBuilder, U: ArgBuilderMaker<T>> ProcPool<T, U> {
     }
 
     fn push_arg(&mut self, arg: &str) {
-        // we don't expect the execution to be finalized without a new arg being pushed
-        assert!(!self.proc_builder.finalized());
         let finalized = self.proc_builder.push_arg(arg.into());
         if !finalized {
             return;
         }
         self.wait_for_room();
+        self.spawn();
+    }
+
+    fn wait_for_room(&mut self) {
+        self.wait_until_len(self.max_parallelism - 1);
+    }
+
+    pub fn wait_all(&mut self) {
+        if self.proc_builder.viable() {
+            self.wait_for_room();
+            self.spawn();
+        }
+        self.wait_until_len(0);
+    }
+
+    fn spawn(&mut self) {
         let stdout_cfg = if self.pipe_stdout {
             process::Stdio::piped()
         } else {
@@ -246,14 +113,6 @@ impl<T: ArgBuilder, U: ArgBuilderMaker<T>> ProcPool<T, U> {
                 .expect("unabled to spawn process"),
         );
         self.proc_builder = self.proc_builder_fn.make();
-    }
-
-    fn wait_for_room(&mut self) {
-        self.wait_until_len(self.max_parallelism - 1);
-    }
-
-    pub fn wait_all(&mut self) {
-        self.wait_until_len(0);
     }
 
     fn wait_until_len(&mut self, len: usize) {
@@ -356,6 +215,11 @@ fn clean_arg<'a>(delims: &[u8], arg: &'a [u8]) -> Option<&'a str> {
 fn main() {
     let args = Args::parse();
 
+    if args.min_args_count > args.max_args_count {
+        eprintln!("min arg count cannot be larger than max count");
+        return;
+    }
+
     let delims = match (args.delim, args.null_sep) {
         (None, true) => vec![b'\0'],
         (None, false) => vec![b'\n', b'\t', b' '],
@@ -374,10 +238,11 @@ fn main() {
     let reader = stdin.lock();
     let split_iter = reader.split_any(&delims);
 
-    let proc_builder = DynArgBuilderMaker {
+    let proc_builder = args::DynArgBuilderMaker {
         initial_args,
         is_template: args.template,
-        max_args: args.num_args,
+        max_args: args.max_args_count,
+        min_args: args.min_args_count,
     };
 
     let mut pool = ProcPool::new(
