@@ -108,12 +108,11 @@ impl ArgBuilder for TemplateArgs {
     fn push_arg(&mut self, arg: &str) -> bool {
         assert!(!self.viable());
         for i in 0..self.arg_list.len() {
-            if let TemplateArg::IndexedPlaceHolder(templ_idx) = self.arg_list[i] {
-                if self.idx == templ_idx {
+            if let TemplateArg::IndexedPlaceHolder(templ_idx) = self.arg_list[i]
+                && self.idx == templ_idx {
                     self.arg_list[i] = TemplateArg::Value(arg.to_owned());
                     self.finalized_count += 1;
                 }
-            }
         }
         self.idx += 1;
         self.viable()

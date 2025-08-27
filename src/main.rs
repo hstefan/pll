@@ -78,7 +78,7 @@ impl<T: args::ArgBuilder, U: args::ArgBuilderMaker<T>> ProcPool<T, U> {
     }
 
     fn push_arg(&mut self, arg: &str) {
-        let finalized = self.proc_builder.push_arg(arg.into());
+        let finalized = self.proc_builder.push_arg(arg);
         if !finalized {
             return;
         }
@@ -231,7 +231,7 @@ fn main() {
             d
         }
     };
-    let program = args.program.get(0).map(AsRef::as_ref).unwrap_or("echo");
+    let program = args.program.first().map(AsRef::as_ref).unwrap_or("echo");
     let initial_args = args.program.iter().skip(1).map(|v| v.to_owned()).collect();
 
     let stdin = std::io::stdin();
